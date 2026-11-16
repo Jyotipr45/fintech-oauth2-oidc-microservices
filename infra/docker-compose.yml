@@ -113,7 +113,7 @@ services:
       TRANSFER_SERVICE_CLIENT_SECRET: ${TRANSFER_SERVICE_CLIENT_SECRET:?TRANSFER_SERVICE_CLIENT_SECRET is required}
       KEYCLOAK_TEST_USER_PASSWORD: ${KEYCLOAK_TEST_USER_PASSWORD:?KEYCLOAK_TEST_USER_PASSWORD is required}
     volumes:
-      - ./keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm.json:ro
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm-realm.json:ro
     ports:
       - "127.0.0.1:${KEYCLOAK_HOST_PORT:-8080}:8080"
     networks:

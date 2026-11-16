@@ -60,7 +60,7 @@ jobs:
             -e KC_BOOTSTRAP_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
             -e TRANSFER_SERVICE_CLIENT_SECRET="${CLIENT_SECRET}" \
             -e KEYCLOAK_TEST_USER_PASSWORD="${USER_PASSWORD}" \
-            -v "${PWD}/infra/keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm.json:ro" \
+            -v "${PWD}/infra/keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm-realm.json:ro" \
             "quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}" start-dev --import-realm
           for i in $(seq 1 60); do
             if curl -fsS http://localhost:8080/realms/banking-realm/.well-known/openid-configuration >/dev/null; then
