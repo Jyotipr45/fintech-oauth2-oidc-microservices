@@ -1,0 +1,233 @@
+# =============================================================================
+#  Fintech OAuth2 / OIDC microservices — local stack
+#  Copyright (c) 2026 Jyotiprakash Parida — SPDX-License-Identifier: MIT
+#
+#  Start:   docker compose -f infra/docker-compose.yml up -d --build
+#  Prereqs: infra/.env (see infra/.env.example) and "127.0.0.1 keycloak" in your hosts file.
+#
+#  Every credential is an ${ENV_VAR} placeholder resolved from infra/.env.
+#  ${VAR:?msg} makes Compose refuse to start when a required value is missing.
+#  Only the gateway and Keycloak publish ports, bound to 127.0.0.1.
+# =============================================================================
+name: fintech-banking
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - backend
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 — one database + one role per service (see postgres/init)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:?POSTGRES_SUPERUSER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD is required}
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:?}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:?}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
+      ACCOUNT_DB_NAME: ${ACCOUNT_DB_NAME:?}
+      ACCOUNT_DB_USER: ${ACCOUNT_DB_USER:?}
+      ACCOUNT_DB_PASSWORD: ${ACCOUNT_DB_PASSWORD:?ACCOUNT_DB_PASSWORD is required}
+      TRANSFER_DB_NAME: ${TRANSFER_DB_NAME:?}
+      TRANSFER_DB_USER: ${TRANSFER_DB_USER:?}
+      TRANSFER_DB_PASSWORD: ${TRANSFER_DB_PASSWORD:?TRANSFER_DB_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Redis — gateway rate limiting + transfer-service jti denylist
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:${REDIS_VERSION:-8.2-alpine}
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - --appendonly
+      - "yes"
+      - --protected-mode
+      - "yes"
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Keycloak — OAuth 2.0 / OIDC authorization server, signs tokens with RS256
+  # ---------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.4}
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:?KEYCLOAK_ADMIN_USER is required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}
+      # Single public hostname so the "iss" claim is identical for browsers and containers.
+      # Local only: plain HTTP. In production terminate TLS in front and use an https:// hostname.
+      KC_HOSTNAME: http://keycloak:8080
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_LOG_LEVEL: INFO
+      # Substituted into realm-export.json placeholders at import time.
+      TRANSFER_SERVICE_CLIENT_SECRET: ${TRANSFER_SERVICE_CLIENT_SECRET:?TRANSFER_SERVICE_CLIENT_SECRET is required}
+      KEYCLOAK_TEST_USER_PASSWORD: ${KEYCLOAK_TEST_USER_PASSWORD:?KEYCLOAK_TEST_USER_PASSWORD is required}
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm.json:ro
+    ports:
+      - "127.0.0.1:${KEYCLOAK_HOST_PORT:-8080}:8080"
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The Keycloak image ships without curl/wget: probe the management port with bash /dev/tcp.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # API gateway — the only application entry point
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: infra/docker/service.Dockerfile
+      args:
+        MODULE: api-gateway
+    image: fintech-banking/api-gateway:local
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      KEYCLOAK_ISSUER_URI: ${KEYCLOAK_ISSUER_URI:?KEYCLOAK_ISSUER_URI is required}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      RATE_LIMIT_REPLENISH_RATE: ${RATE_LIMIT_REPLENISH_RATE:-10}
+      RATE_LIMIT_BURST_CAPACITY: ${RATE_LIMIT_BURST_CAPACITY:-20}
+      ACCOUNT_SERVICE_URI: http://account-service:8080
+      TRANSFER_SERVICE_URI: http://transfer-service:8080
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8000}:8080"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # account-service — internal only (no published port)
+  # ---------------------------------------------------------------------------
+  account-service:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: infra/docker/service.Dockerfile
+      args:
+        MODULE: account-service
+    image: fintech-banking/account-service:local
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      KEYCLOAK_ISSUER_URI: ${KEYCLOAK_ISSUER_URI}
+      DB_URL: jdbc:postgresql://postgres:5432/${ACCOUNT_DB_NAME}
+      DB_USERNAME: ${ACCOUNT_DB_USER}
+      DB_PASSWORD: ${ACCOUNT_DB_PASSWORD}
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # transfer-service — internal only (no published port)
+  # ---------------------------------------------------------------------------
+  transfer-service:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: infra/docker/service.Dockerfile
+      args:
+        MODULE: transfer-service
+    image: fintech-banking/transfer-service:local
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      KEYCLOAK_ISSUER_URI: ${KEYCLOAK_ISSUER_URI}
+      DB_URL: jdbc:postgresql://postgres:5432/${TRANSFER_DB_NAME}
+      DB_USERNAME: ${TRANSFER_DB_USER}
+      DB_PASSWORD: ${TRANSFER_DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TRANSFER_SERVICE_CLIENT_ID: transfer-service-client
+      TRANSFER_SERVICE_CLIENT_SECRET: ${TRANSFER_SERVICE_CLIENT_SECRET}
+      ACCOUNT_SERVICE_URI: http://account-service:8080
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      account-service:
+        condition: service_healthy
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
