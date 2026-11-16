@@ -1,0 +1,111 @@
+# Copyright (c) 2026 Jyotiprakash Parida — SPDX-License-Identifier: MIT
+# Every environment-specific value or secret is an ${ENV_VAR} placeholder (see infra/.env.example).
+server:
+  port: 8080
+  shutdown: graceful
+  max-http-request-header-size: 16KB
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+    include-exception: false
+  tomcat:
+    max-swallow-size: 1MB
+    threads:
+      max: 100
+
+spring:
+  application:
+    name: transfer-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 3000
+      pool-name: transfer-db-pool
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  mvc:
+    problemdetails:
+      enabled: true
+  jackson:
+    default-property-inclusion: non_null
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 2s
+  security:
+    oauth2:
+      client:
+        registration:
+          account-service:
+            provider: keycloak
+            client-id: ${TRANSFER_SERVICE_CLIENT_ID}
+            client-secret: ${TRANSFER_SERVICE_CLIENT_SECRET}
+            client-authentication-method: client_secret_basic
+            authorization-grant-type: client_credentials
+        provider:
+          keycloak:
+            # token-uri (not issuer-uri) so startup never depends on Keycloak being reachable.
+            token-uri: ${KEYCLOAK_ISSUER_URI}/protocol/openid-connect/token
+
+banking:
+  security:
+    issuer-uri: ${KEYCLOAK_ISSUER_URI}
+    audiences: transfer-service
+    clock-skew: 30s
+    jwks-cache-ttl: 5m
+
+transfer:
+  account-service-uri: ${ACCOUNT_SERVICE_URI}
+  client-registration-id: account-service
+  rate-limit:
+    max-requests: ${TRANSFER_RATE_LIMIT_MAX:5}
+    window: 60s
+  outbox:
+    batch-size: 50
+    max-attempts: 10
+    publish-timeout: 5s
+    poll-interval-ms: 2000
+  executor:
+    core-pool-size: 2
+    max-pool-size: 4
+    queue-capacity: 200
+  http:
+    connect-timeout: 2s
+    read-timeout: 5s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  info:
+    env:
+      enabled: false
+
+logging:
+  level:
+    root: INFO
+    banking.access: INFO
+    banking.audit: INFO

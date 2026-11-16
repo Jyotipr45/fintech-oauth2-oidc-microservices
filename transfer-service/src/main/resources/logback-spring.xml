@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (c) 2026 Jyotiprakash Parida — SPDX-License-Identifier: MIT -->
+<configuration>
+    <include resource="banking-logback-masking.xml"/>
+    <root level="INFO">
+        <appender-ref ref="BANKING_MASKED_CONSOLE"/>
+    </root>
+</configuration>
