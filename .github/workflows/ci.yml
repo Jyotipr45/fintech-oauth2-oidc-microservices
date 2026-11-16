@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & test (Java 17)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      # Phase 1 ships the shared security library; service modules are added in Phase 2.
+      - name: Build common-security
+        run: mvn -B -ntp -pl common-security -am verify
+
+      - name: Guard - no wildcard imports
+        run: |
+          if grep -rnE '^import (static )?[a-zA-Z0-9_.]+\.\*;' --include='*.java' .; then
+            echo "Wildcard imports are not allowed"; exit 1
+          fi
+
+      - name: Guard - no committed key material or env files
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|\.pem$|\.key$|\.jks$|\.p12$'; then
+            echo "Secrets or key material must not be committed"; exit 1
+          fi
+
+  keycloak-realm:
+    name: Keycloak realm import & token smoke test
+    runs-on: ubuntu-latest
+    env:
+      KEYCLOAK_VERSION: "26.4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Keycloak with banking-realm import
+        run: |
+          ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          CLIENT_SECRET="$(openssl rand -hex 24)"
+          USER_PASSWORD="Ci#$(openssl rand -hex 8)Aa1"
+          echo "::add-mask::${ADMIN_PASSWORD}"
+          echo "::add-mask::${CLIENT_SECRET}"
+          echo "::add-mask::${USER_PASSWORD}"
+          echo "CLIENT_SECRET=${CLIENT_SECRET}" >> "${GITHUB_ENV}"
+          docker run -d --name keycloak -p 8080:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=ci-admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+            -e TRANSFER_SERVICE_CLIENT_SECRET="${CLIENT_SECRET}" \
+            -e KEYCLOAK_TEST_USER_PASSWORD="${USER_PASSWORD}" \
+            -v "${PWD}/infra/keycloak/realm-export.json:/opt/keycloak/data/import/banking-realm.json:ro" \
+            "quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}" start-dev --import-realm
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/realms/banking-realm/.well-known/openid-configuration >/dev/null; then
+              echo "Keycloak ready"; exit 0
+            fi
+            sleep 3
+          done
+          docker logs keycloak | tail -n 100
+          exit 1
+
+      - name: Verify RS256 JWKS, client_credentials token claims and disabled password grant
+        run: |
+          set -euo pipefail
+          BASE=http://localhost:8080/realms/banking-realm
+
+          curl -fsS "${BASE}/protocol/openid-connect/certs" \
+            | jq -e '[.keys[] | select(.use == "sig" and .alg == "RS256" and .kty == "RSA")] | length >= 1'
+
+          TOKEN="$(curl -fsS -X POST "${BASE}/protocol/openid-connect/token" \
+            -d grant_type=client_credentials \
+            -d client_id=transfer-service-client \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" | jq -r .access_token)"
+
+          b64url_decode() { python3 -c 'import base64,sys; s=sys.argv[1]; print(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode())' "$1"; }
+          HEADER="$(b64url_decode "$(cut -d. -f1 <<<"${TOKEN}")")"
+          PAYLOAD="$(b64url_decode "$(cut -d. -f2 <<<"${TOKEN}")")"
+
+          jq -e '.alg == "RS256" and (.kid | length > 0)' <<<"${HEADER}"
+          jq -e '.iss == "http://localhost:8080/realms/banking-realm"' <<<"${PAYLOAD}"
+          jq -e '.typ == "Bearer"' <<<"${PAYLOAD}"
+          jq -e '(.aud | if type == "array" then . else [.] end) | index("account-service") != null' <<<"${PAYLOAD}"
+          jq -e '.resource_access["banking-api"].roles | index("account:balance-adjust") != null' <<<"${PAYLOAD}"
+          jq -e 'has("email") | not' <<<"${PAYLOAD}"
+
+          STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/protocol/openid-connect/token" \
+            -d grant_type=password -d client_id=banking-web-pkce -d username=alice.customer -d password=wrong)"
+          echo "Password grant on PKCE client returned HTTP ${STATUS}"
+          test "${STATUS}" = "400" -o "${STATUS}" = "401"
+
+      - name: Keycloak logs on failure
+        if: failure()
+        run: docker logs keycloak | tail -n 200
