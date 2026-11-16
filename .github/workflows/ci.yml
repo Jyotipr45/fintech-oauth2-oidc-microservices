@@ -22,9 +22,8 @@ jobs:
           java-version: "17"
           cache: maven
 
-      # Phase 1 ships the shared security library; service modules are added in Phase 2.
-      - name: Build common-security
-        run: mvn -B -ntp -pl common-security -am verify
+      - name: Build and test all modules
+        run: mvn -B -ntp verify
 
       - name: Guard - no wildcard imports
         run: |
@@ -103,3 +102,31 @@ jobs:
       - name: Keycloak logs on failure
         if: failure()
         run: docker logs keycloak | tail -n 200
+
+  e2e:
+    name: End-to-end security tests (Docker Compose stack)
+    runs-on: ubuntu-latest
+    needs: [build, keycloak-realm]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the issuer hostname like a developer machine
+        run: echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts
+
+      - name: Generate infra/.env with random secrets
+        run: ./infra/scripts/generate-env.sh
+
+      - name: Start the full stack
+        run: docker compose -f infra/docker-compose.yml up -d --build --wait --wait-timeout 600
+
+      - name: Run end-to-end security tests
+        run: ./.github/scripts/e2e.sh
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/docker-compose.yml down -v
