@@ -1,0 +1,334 @@
+{
+  "realm": "banking-realm",
+  "displayName": "Banking Platform",
+  "enabled": true,
+
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername and passwordHistory(3)",
+
+  "defaultSignatureAlgorithm": "RS256",
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 300,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 1800,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "offlineSessionMaxLifespanEnabled": true,
+  "offlineSessionMaxLifespan": 5184000,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "actionTokenGeneratedByUserLifespan": 300,
+  "actionTokenGeneratedByAdminLifespan": 43200,
+
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": false,
+
+  "roles": {
+    "realm": [
+      {
+        "name": "CUSTOMER",
+        "description": "Retail banking customer. May only access accounts and transfers they own.",
+        "composite": true,
+        "composites": {
+          "client": {
+            "banking-api": ["account:read", "account:write", "transfer:create", "transfer:read"]
+          }
+        }
+      },
+      {
+        "name": "ADMIN",
+        "description": "Bank operations administrator.",
+        "composite": true,
+        "composites": {
+          "client": {
+            "banking-api": ["account:read", "account:read-all", "account:write", "account:freeze", "transfer:read", "transfer:read-all"]
+          }
+        }
+      },
+      {
+        "name": "AUDITOR",
+        "description": "Read-only compliance auditor.",
+        "composite": true,
+        "composites": {
+          "client": {
+            "banking-api": ["account:read-all", "transfer:read-all", "audit:read"]
+          }
+        }
+      }
+    ],
+    "client": {
+      "banking-api": [
+        { "name": "account:read", "description": "Read own accounts" },
+        { "name": "account:read-all", "description": "Read any customer's accounts" },
+        { "name": "account:write", "description": "Create or update own accounts" },
+        { "name": "account:freeze", "description": "Freeze or unfreeze any account" },
+        { "name": "account:balance-adjust", "description": "Internal: debit/credit balances (service-to-service only)" },
+        { "name": "transfer:create", "description": "Initiate a transfer from an owned account" },
+        { "name": "transfer:read", "description": "Read own transfers" },
+        { "name": "transfer:read-all", "description": "Read any transfer" },
+        { "name": "audit:read", "description": "Read audit trail" }
+      ]
+    }
+  },
+
+  "clients": [
+    {
+      "clientId": "banking-api",
+      "name": "Banking API (resource server role container)",
+      "description": "Holds fine-grained permissions as client roles. Never used to obtain tokens.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "banking-web-pkce",
+      "name": "Banking Web App (public SPA, Authorization Code + PKCE)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "fullScopeAllowed": true,
+      "consentRequired": false,
+      "redirectUris": [
+        "http://localhost:3000/callback",
+        "http://127.0.0.1:8765/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/",
+        "use.refresh.tokens": "true",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "backchannel.logout.session.required": "true",
+        "access.token.lifespan": "300"
+      },
+      "defaultClientScopes": ["web-origins", "acr", "roles", "basic"],
+      "optionalClientScopes": ["profile", "email", "offline_access"],
+      "protocolMappers": [
+        {
+          "name": "audience-banking-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "banking-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience-account-service",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "account-service",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience-transfer-service",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "transfer-service",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "transfer-service-client",
+      "name": "Transfer Service (confidential, Client Credentials)",
+      "description": "Machine identity of transfer-service for service-to-service calls to account-service.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${TRANSFER_SERVICE_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "access.token.lifespan": "300",
+        "client_credentials.use_refresh_token": "false",
+        "use.refresh.tokens": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false"
+      },
+      "defaultClientScopes": ["roles", "basic"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "audience-account-service",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "account-service",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "alice.customer",
+      "enabled": true,
+      "email": "alice.customer@example.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Customer",
+      "credentials": [
+        { "type": "password", "value": "${KEYCLOAK_TEST_USER_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["CUSTOMER"]
+    },
+    {
+      "username": "bob.customer",
+      "enabled": true,
+      "email": "bob.customer@example.test",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Customer",
+      "credentials": [
+        { "type": "password", "value": "${KEYCLOAK_TEST_USER_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["CUSTOMER"]
+    },
+    {
+      "username": "carol.admin",
+      "enabled": true,
+      "email": "carol.admin@example.test",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Admin",
+      "credentials": [
+        { "type": "password", "value": "${KEYCLOAK_TEST_USER_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["ADMIN"]
+    },
+    {
+      "username": "dave.auditor",
+      "enabled": true,
+      "email": "dave.auditor@example.test",
+      "emailVerified": true,
+      "firstName": "Dave",
+      "lastName": "Auditor",
+      "credentials": [
+        { "type": "password", "value": "${KEYCLOAK_TEST_USER_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["AUDITOR"]
+    },
+    {
+      "username": "service-account-transfer-service-client",
+      "enabled": true,
+      "serviceAccountClientId": "transfer-service-client",
+      "realmRoles": [],
+      "clientRoles": {
+        "banking-api": ["account:balance-adjust"]
+      }
+    }
+  ],
+
+  "components": {
+    "org.keycloak.keys.KeyProvider": [
+      {
+        "name": "rsa-rs256-signing",
+        "providerId": "rsa-generated",
+        "subComponents": {},
+        "config": {
+          "priority": ["200"],
+          "enabled": ["true"],
+          "active": ["true"],
+          "keySize": ["2048"],
+          "algorithm": ["RS256"]
+        }
+      },
+      {
+        "name": "rsa-oaep-encryption",
+        "providerId": "rsa-enc-generated",
+        "subComponents": {},
+        "config": {
+          "priority": ["100"],
+          "enabled": ["true"],
+          "active": ["true"],
+          "keySize": ["2048"],
+          "algorithm": ["RSA-OAEP"]
+        }
+      },
+      {
+        "name": "hmac-internal-hs512",
+        "providerId": "hmac-generated",
+        "subComponents": {},
+        "config": {
+          "priority": ["100"],
+          "enabled": ["true"],
+          "active": ["true"],
+          "secretSize": ["64"],
+          "algorithm": ["HS512"]
+        }
+      },
+      {
+        "name": "aes-internal",
+        "providerId": "aes-generated",
+        "subComponents": {},
+        "config": {
+          "priority": ["100"],
+          "enabled": ["true"],
+          "active": ["true"],
+          "secretSize": ["16"]
+        }
+      }
+    ]
+  }
+}
