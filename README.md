@@ -4,8 +4,14 @@ A banking microservices reference platform showing **OAuth 2.0**, **OpenID Conne
 authentication and authorization built only from free, open-source parts:
 Java 17, Spring Boot 3.4 (Spring Security 6, Spring Cloud Gateway), Keycloak, PostgreSQL 16, Redis and Docker Compose.
 
-> **Status:** Phase 1 is complete: build system, infrastructure, Keycloak realm and the `common-security` library.
-> Phase 2 adds the gateway, account and transfer services, plus the full security architecture guide.
+[![CI](https://github.com/Jyotipr45/fintech-oauth2-oidc-microservices/actions/workflows/ci.yml/badge.svg?branch=feat/oauth2-oidc-security-architecture)](https://github.com/Jyotipr45/fintech-oauth2-oidc-microservices/actions/workflows/ci.yml)
+
+Every push is checked in CI with a Java 17 build, unit and slice tests, a Keycloak realm smoke test, and
+an **end-to-end security suite** run against the full Docker Compose stack: 401/403, BOLA/IDOR, tampered and
+`alg=none` tokens, ID-token misuse, idempotency, token propagation, velocity limits and `jti` revocation.
+
+📘 **Deep dive:** [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) covers the token model, Mermaid sequence diagrams,
+the authorization matrix, CSRF/BFF, the system-design patterns and `curl` walkthroughs.
 
 ## Architecture at a glance
 
@@ -23,9 +29,9 @@ Java 17, Spring Boot 3.4 (Spring Security 6, Spring Cloud Gateway), Keycloak, Po
 | Module | Role |
 |---|---|
 | `common-security` | Shared library: RS256-only `NimbusJwtDecoder` built from the issuer location, with `iss`/`aud`/`exp`/`nbf`/`sub`/`typ` validation, a Keycloak role-to-authority converter, RFC 7807 401/403 handlers and masked logging. It auto-configures for servlet and reactive stacks. |
-| `api-gateway` | Spring Cloud Gateway: edge routing, first-line JWT validation, explicit-origin CORS and Redis token-bucket rate limiting *(Phase 2)* |
-| `account-service` | Resource server: stateless, `@PreAuthorize` RBAC (`CUSTOMER`, `ADMIN`, `AUDITOR`), ownership bound to JWT `sub` *(Phase 2)* |
-| `transfer-service` | Resource server: user-token propagation vs. Client Credentials, Redis `jti` revocation *(Phase 2)* |
+| `api-gateway` | Spring Cloud Gateway (reactive): edge JWT validation, explicit-origin CORS, Redis token-bucket rate limiting per `sub`, per-route circuit breakers with fallbacks, GET-only retries, request-size limits |
+| `account-service` | Resource server: stateless, `@PreAuthorize` RBAC (`CUSTOMER`, `ADMIN`, `AUDITOR`), owner-scoped SQL bound to JWT `sub` (BOLA/IDOR), and an atomic, idempotent internal ledger for machine clients only |
+| `transfer-service` | Resource server: user-token propagation vs. Client Credentials, Redis `jti` denylist and per-user velocity limit (fail closed), Resilience4j retry/circuit breaker/bulkhead, `Idempotency-Key`, saga states, transactional outbox on a bounded `ThreadPoolExecutor` |
 | `infra/` | Docker Compose stack, Keycloak realm import, PostgreSQL init script, shared service Dockerfile |
 
 ## Repository layout
@@ -34,17 +40,20 @@ Java 17, Spring Boot 3.4 (Spring Security 6, Spring Cloud Gateway), Keycloak, Po
 .
 ├── pom.xml                         # parent: Java 17, Spring Boot 3.4.x, Spring Cloud 2024.0.x BOM
 ├── common-security/                # shared security auto-configuration (see below)
-├── api-gateway/                    # pom.xml (code in Phase 2)
-├── account-service/                # pom.xml (code in Phase 2)
-├── transfer-service/               # pom.xml (code in Phase 2)
+├── api-gateway/                    # security, CORS, rate limit, circuit breaker, routes
+├── account-service/                # accounts, RBAC, ownership, internal ledger, Flyway
+├── transfer-service/               # transfers, token propagation, client credentials, outbox
+├── docs/SECURITY_ARCHITECTURE.md   # architecture, diagrams, patterns, curl guide
 ├── infra/
 │   ├── docker-compose.yml
 │   ├── .env.example                # copy to infra/.env (git-ignored)
 │   ├── docker/service.Dockerfile   # multi-stage, non-root, layered JAR
 │   ├── keycloak/realm-export.json  # banking-realm: RS256 keys, clients, roles, demo users
 │   ├── postgres/init/01-create-databases.sh
-│   └── scripts/generate-env.sh     # writes infra/.env with random secrets
-└── .github/workflows/ci.yml        # Java 17 build + Keycloak realm/token smoke test
+│   └── scripts/
+│       ├── generate-env.sh         # writes infra/.env with random secrets
+│       └── pkce-login.sh           # terminal Authorization Code + PKCE login
+└── .github/                        # CI: build, realm smoke test, full-stack e2e suite
 ```
 
 ## Security model, in short
@@ -67,36 +76,56 @@ Java 17, Spring Boot 3.4 (Spring Security 6, Spring Cloud Gateway), Keycloak, Po
 
 ## Quick start (local)
 
-Prerequisites: Docker with Compose v2, JDK 17 and Maven 3.9+ for building outside Docker, and `openssl`.
+Prerequisites: Docker with Compose v2, `openssl`, `jq`, and `python3` for the PKCE helper. JDK 17 and Maven 3.9+ are needed only to build outside Docker.
 
 ```bash
-# 1. Make the issuer hostname resolve on your machine (the containers already resolve it).
+# 1. Make the issuer hostname resolve on your machine (containers already resolve it).
 #    The token "iss" must be identical for your browser/curl and for the services.
 echo "127.0.0.1 keycloak" | sudo tee -a /etc/hosts      # Windows: C:\Windows\System32\drivers\etc\hosts
 
-# 2. Generate infra/.env with random secrets (or copy .env.example and edit).
+# 2. Generate infra/.env with random secrets (or copy infra/.env.example and edit every CHANGE_ME).
 ./infra/scripts/generate-env.sh
 
-# 3. Build the shared library.
-mvn -B -pl common-security -am verify
+# 3. Build and start everything: PostgreSQL, Redis, Keycloak, gateway, account and transfer services.
+docker compose -f infra/docker-compose.yml up -d --build --wait
 
-# 4. Start the infrastructure. In Phase 1, start the backing services only:
-docker compose -f infra/docker-compose.yml up -d postgres redis keycloak
+# 4. Sign in with Authorization Code + PKCE (opens a URL, catches the redirect locally).
+ALICE=$(./infra/scripts/pkce-login.sh | jq -r .access_token)     # user: alice.customer
+curl -s -H "Authorization: Bearer $ALICE" http://localhost:8000/api/v1/accounts/me | jq
 ```
 
-Keycloak's admin console is at <http://keycloak:8080/admin>. The bootstrap admin credentials are in `infra/.env`.
+| Endpoint | URL |
+|---|---|
+| API gateway | <http://localhost:8000> |
+| Keycloak admin console | <http://keycloak:8080/admin> (bootstrap admin credentials are in `infra/.env`) |
+
 Demo users: `alice.customer`, `bob.customer` (`CUSTOMER`), `carol.admin` (`ADMIN`) and `dave.auditor` (`AUDITOR`).
+They share the password `KEYCLOAK_TEST_USER_PASSWORD` from `infra/.env`.
 
-Smoke test, machine-to-machine token:
+The [security architecture guide](docs/SECURITY_ARCHITECTURE.md#8-hands-on-testing-with-curl) has the full `curl` walkthrough: PKCE and Client Credentials tokens, 401/403/404, BOLA/IDOR, idempotency, revocation, rate limits and refresh-token rotation.
 
-```bash
-set -a; . infra/.env; set +a
-curl -s -X POST http://keycloak:8080/realms/banking-realm/protocol/openid-connect/token \
-  -d grant_type=client_credentials -d client_id=transfer-service-client \
-  --data-urlencode "client_secret=${TRANSFER_SERVICE_CLIENT_SECRET}" | jq '{token_type, expires_in}'
-```
+### API overview
 
-Full PKCE, `401`/`403` and BOLA test walkthroughs ship with Phase 2 in `docs/SECURITY_ARCHITECTURE.md`.
+| Method & path | Who |
+|---|---|
+| `GET /api/v1/accounts/me` | customer (own accounts) |
+| `GET /api/v1/accounts` | admin, auditor |
+| `GET /api/v1/accounts/{id}` | owner, admin, auditor (others get 404) |
+| `POST /api/v1/accounts` | customer |
+| `PATCH /api/v1/accounts/{id}/status` | admin |
+| `POST /api/v1/accounts/{id}/deposits` | admin |
+| `POST /api/v1/transfers` (needs `Idempotency-Key`) | customer, from own account |
+| `GET /api/v1/transfers`, `GET /api/v1/transfers/{id}` | owner (`transfer:read-all` sees any) |
+| `POST /api/v1/transfers/token-revocations` | any authenticated user (revokes the current token) |
+
+### System design patterns used
+
+API gateway · two-tier rate limiting (Redis token bucket per user + per-user transfer velocity limit) ·
+circuit breakers with fallbacks · retry with exponential back-off and jitter (idempotent calls only) · bulkhead ·
+timeouts · bounded `ThreadPoolExecutor` with back-pressure · idempotency keys · orchestration saga ·
+transactional outbox with `SKIP LOCKED` relay · idempotent receiver · ordered pessimistic locks plus optimistic locking ·
+database per service · anti-corruption layer · ports & adapters · zero trust · least privilege · fail closed.
+The [patterns table](docs/SECURITY_ARCHITECTURE.md#7-system-design-patterns) maps each one to the code.
 
 ## Using `common-security` in a service
 
